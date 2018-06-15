@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"io/ioutil"
 	"log"
 
@@ -17,10 +18,15 @@ type Hero struct {
 	Role       string `json:"role"`
 }
 
-const heroesDir = "/Users/danielbarreto/dev/heroes-talents/hero/"
-
 func main() {
-	files, err := ioutil.ReadDir(heroesDir)
+	heroesDir := flag.String("dir", "", "-dir is the directory containing the hero files")
+	flag.Parse()
+
+	if *heroesDir == "" {
+		log.Fatal("Please specify a directory with -dir")
+	}
+
+	files, err := ioutil.ReadDir(*heroesDir)
 	check(err)
 
 	connStr := "dbname=hots sslmode=disable"
@@ -29,45 +35,53 @@ func main() {
 
 	defer db.Close()
 
+	checkForHeroStmt, err := db.Prepare("SELECT COUNT(*) FROM heroes WHERE name = $1")
+	check(err)
+	defer checkForHeroStmt.Close()
+
+	getRoleIDStmt, err := db.Prepare("SELECT id FROM roles WHERE name = $1")
+	check(err)
+	defer getRoleIDStmt.Close()
+
+	insertHeroStmt, err := db.Prepare("INSERT INTO heroes(name, portrait, tier, attack_type, role_id) VALUES($1,$2,$3,$4,$5)")
+	check(err)
+	defer insertHeroStmt.Close()
+
 	for _, file := range files {
 		log.Println("Reading " + file.Name())
-		dat, err := ioutil.ReadFile(heroesDir + file.Name())
+		dat, err := ioutil.ReadFile(*heroesDir + file.Name())
 
 		if err != nil {
-			log.Println("There was an error reading the file... Skipping")
+			log.Printf("Skipping file `%s` because there was an error reading it: %s\n", file, err.Error())
 			continue
 		}
 
 		var info Hero
 		err = json.Unmarshal(dat, &info)
 		if err != nil {
-			log.Println("There was an error processing the file... Skipping")
+			log.Printf("Skipping file `%s` because there was an error processing it: %s\n", file, err.Error())
 			continue
 		}
 
-		stmt, err := db.Prepare("select name from heroes where name = $1")
+		var count int
+		err = checkForHeroStmt.QueryRow(info.Name).Scan(&count)
 		check(err)
 
-		var name string
-		err = stmt.QueryRow(info.Name).Scan(&name)
-
-		if err == nil {
-			log.Println("This has already been imported... Skipping")
+		if count > 0 {
+			log.Printf("Hero %q has already been imported... Skipping\n", info.Name)
 			continue
 		}
 
 		var role int
-		stmt, err = db.Prepare("select id from roles where name = $1")
+		err = getRoleIDStmt.QueryRow(info.Role).Scan(&role)
 		check(err)
 
-		err = stmt.QueryRow(info.Role).Scan(&role)
-
-		stmt, err = db.Prepare("insert into heroes(name, portrait, tier, attack_type, role_id) Values($1,$2,$3,$4,$5)")
+		_, err = insertHeroStmt.Exec(info.Name, info.Portrait, 0, info.AttackType, role)
 		check(err)
-
-		_, err = stmt.Exec(info.Name, info.Portrait, 0, info.AttackType, role)
-		check(err)
+		log.Printf("%q was successfully imported\n", info.Name)
 	}
+
+	log.Println("Done!")
 }
 
 func check(err error) {
